@@ -1,0 +1,34 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller folders/files
+build/
+dist/
+*.spec
+
+# FFmpeg Executables (too large for GitHub)
+ffmpeg.exe
+ffprobe.exe
+ffmpeg.zip
+ffmpeg-master-latest-win64-gpl.zip
+ffmpeg-master-latest-win64-gpl/
+ffmpeg_extracted/
+
+# Logs and Settings
+tts.log
+tts_settings.json
+
+# IDE
+.vscode/
+.idea/
