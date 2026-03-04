@@ -1,16 +1,45 @@
 import customtkinter as ctk
 import sounddevice as sd
 import threading
+import queue
+import time
+import os
 import asyncio
+import edge_tts
 import logging
 import json
 import os
 
-# 引入核心播放引擎與它的 logging 系統設定
 from tts import stream_and_play, generate_and_save
 from tkinter import filedialog
 
 SETTINGS_FILE = "tts_settings.json"
+
+LOCALE_MAP = {
+    'af': 'Afrikaans', 'am': 'Amharic', 'ar': 'Arabic', 'az': 'Azerbaijani',
+    'bg': 'Bulgarian', 'bn': 'Bengali', 'bs': 'Bosnian', 'ca': 'Catalan',
+    'cs': 'Czech', 'cy': 'Welsh', 'da': 'Danish', 'de': 'German',
+    'el': 'Greek', 'en': 'English', 'es': 'Spanish', 'et': 'Estonian',
+    'fa': 'Persian', 'fi': 'Finnish', 'fr': 'French', 'ga': 'Irish',
+    'gl': 'Galician', 'gu': 'Gujarati', 'he': 'Hebrew', 'hi': 'Hindi',
+    'hr': 'Croatian', 'hu': 'Hungarian', 'id': 'Indonesian', 'is': 'Icelandic',
+    'it': 'Italian', 'ja': 'Japanese', 'jv': 'Javanese', 'ka': 'Georgian',
+    'kk': 'Kazakh', 'km': 'Khmer', 'kn': 'Kannada', 'ko': 'Korean',
+    'lo': 'Lao', 'lt': 'Lithuanian', 'lv': 'Latvian', 'mk': 'Macedonian',
+    'ml': 'Malayalam', 'mn': 'Mongolian', 'mr': 'Marathi', 'ms': 'Malay',
+    'mt': 'Maltese', 'my': 'Burmese', 'nb': 'Norwegian Bokmål', 'ne': 'Nepali',
+    'nl': 'Dutch', 'pl': 'Polish', 'ps': 'Pashto', 'pt': 'Portuguese',
+    'ro': 'Romanian', 'ru': 'Russian', 'si': 'Sinhala', 'sk': 'Slovak',
+    'sl': 'Slovenian', 'so': 'Somali', 'sq': 'Albanian', 'sr': 'Serbian',
+    'su': 'Sundanese', 'sv': 'Swedish', 'sw': 'Swahili', 'ta': 'Tamil',
+    'te': 'Telugu', 'th': 'Thai', 'tr': 'Turkish', 'uk': 'Ukrainian',
+    'ur': 'Urdu', 'uz': 'Uzbek', 'vi': 'Vietnamese', 'zh': 'Chinese',
+    'zu': 'Zulu'
+}
+
+def get_language_name(locale_code):
+    lang_prefix = locale_code.split('-')[0]
+    return LOCALE_MAP.get(lang_prefix, lang_prefix.upper())
 
 def get_audio_devices():
     """獲取系統可用的音訊輸出設備，回傳 {設備名稱: 設備ID} 字典"""
@@ -42,13 +71,173 @@ def get_audio_devices():
             
     return output_devices
 
+class VoiceSelectionPopup(ctk.CTkToplevel):
+    def __init__(self, master, voices_by_lang, current_voice_short_name, on_voice_selected):
+        super().__init__(master)
+        self.title("Select Voice")
+        self.transient(master)
+        self.overrideredirect(True)
+        
+        self.voices_by_lang = voices_by_lang
+        self.on_voice_selected = on_voice_selected
+        
+        # 綁定焦點失去與 Esc 關閉事件
+        self.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<Escape>", lambda e: self.destroy())
+        
+        # 取得母視窗按鈕的位置與大小，用於定位拉下選單
+        btn = master.voice_selector_btn
+        self.target_width = btn.winfo_width()
+        if self.target_width < 320:
+            self.target_width = 320  # 設定最小寬度防呆
+            
+        self.target_height = 380
+        self.popup_x = btn.winfo_rootx()
+        self.popup_y = btn.winfo_rooty() + btn.winfo_height() + 2
+        
+        # 初始高度為 0 以做下滑動畫
+        self.geometry(f"{self.target_width}x0+{self.popup_x}+{self.popup_y}")
+        
+        # 滿版的背景框架，用來裁剪裡頭滑動的元件
+        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_frame.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
+        
+        # 第一層：大語系 (100% 寬度)
+        self.lang_scroll = ctk.CTkScrollableFrame(self.main_frame, fg_color="#2b2b2b")
+        self.lang_scroll.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
+        
+        header_frame = ctk.CTkFrame(self.lang_scroll, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(5, 5))
+        ctk.CTkLabel(header_frame, text="Select Language", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left", padx=5)
+        # 用戶可以使用外部點擊或 ESC 關閉，不用特別放 X 按鈕
+        
+        for lang in sorted(self.voices_by_lang.keys()):
+            btn_lang = ctk.CTkButton(
+                self.lang_scroll, 
+                text=lang,
+                fg_color="transparent",
+                hover_color="#444444",
+                anchor="w",
+                command=lambda l=lang: self._show_voices_for_lang(l)
+            )
+            btn_lang.pack(fill="x", pady=2, padx=5)
+
+        # 第二層容器：發音員選單
+        # 使用 70% 寬度，滑入時左側會保留 30% 原本的語系選單
+        self.voices_container = ctk.CTkFrame(self.main_frame, fg_color="#1e1e1e")
+        self.voices_container.place(relx=1.0, rely=0, relwidth=0.7, relheight=1.0)
+        
+        self.voices_scroll = ctk.CTkScrollableFrame(self.voices_container, fg_color="transparent")
+        self.voices_scroll.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.animating = False
+        
+        # 動畫展開與強制作為焦點以確保 Esc 鍵能夠每次被觸發
+        self._animate_dropdown_open(0)
+        self.after(150, self.focus_force)
+        
+        # 不使用 grab_set() 避免 Alt-Tab 時 Windows 焦點混亂
+        # 改透過全應用程式層級的滑鼠點擊攔截來實作「點選外圍關閉」
+        self._global_click_id = self.master.winfo_toplevel().bind("<Button-1>", self._on_global_click, add="+")
+
+    def _on_global_click(self, event):
+        # 檢查滑鼠游標是否落在 popup 選單範圍以外
+        try:
+            x1 = self.winfo_rootx()
+            y1 = self.winfo_rooty()
+            x2 = x1 + self.winfo_width()
+            y2 = y1 + self.winfo_height()
+            
+            # 若點選區域在選單外部，關閉選單
+            if not (x1 <= event.x_root <= x2 and y1 <= event.y_root <= y2):
+                # 延遲關閉，讓被點擊的元件(如Textbox)可以先吃下這一次的點擊事件並拿到焦點
+                self.after(10, self.destroy)
+        except:
+            pass
+
+    def destroy(self):
+        # 解除全域滑鼠監聽
+        try:
+            self.master.winfo_toplevel().unbind("<Button-1>", self._global_click_id)
+        except:
+            pass
+        super().destroy()
+
+    def _animate_dropdown_open(self, current_h):
+        new_h = current_h + 40
+        if new_h >= self.target_height:
+            self.geometry(f"{self.target_width}x{self.target_height}+{self.popup_x}+{self.popup_y}")
+        else:
+            self.geometry(f"{self.target_width}x{new_h}+{self.popup_x}+{self.popup_y}")
+            self.after(10, self._animate_dropdown_open, new_h)
+
+    def _on_focus_out(self, event):
+        self.after(50, self._check_focus)
+        
+    def _check_focus(self):
+        try:
+            focused = self.focus_get()
+            if focused is None or focused.winfo_toplevel() != self:
+                self.destroy()
+        except:
+            self.destroy()
+
+    def _show_voices_for_lang(self, lang):
+        for widget in self.voices_scroll.winfo_children():
+            widget.destroy()
+            
+        header = ctk.CTkFrame(self.voices_scroll, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 5))
+        
+        ctk.CTkButton(header, text="< Back", width=60, fg_color="#555555", hover_color="#444444", command=self._hide_voices).pack(side="left")
+        ctk.CTkLabel(header, text=f"{lang} Voices", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left", padx=15)
+        
+        for voice_dict in self.voices_by_lang[lang]:
+            btn = ctk.CTkButton(
+                self.voices_scroll,
+                text=voice_dict['display'],
+                fg_color="transparent",
+                hover_color="#2980B9",
+                anchor="w",
+                command=lambda v=voice_dict: self._select_voice(v)
+            )
+            btn.pack(fill="x", pady=2)
+            
+        current_relx = float(self.voices_container.place_info()['relx'])
+        if current_relx > 0.3 and not self.animating:
+            self.animating = True
+            # 此將子選單拉進畫面並保留原本左邊30%
+            self._animate_slide(0.3, current_relx)
+
+    def _animate_slide(self, target_relx, current_relx):
+        step = -0.1 if target_relx < current_relx else 0.1
+        new_relx = current_relx + step
+        
+        # 修正浮點數誤差
+        if (step < 0 and new_relx <= target_relx) or (step > 0 and new_relx >= target_relx):
+            self.voices_container.place(relx=target_relx)
+            self.animating = False
+        else:
+            self.voices_container.place(relx=new_relx)
+            self.after(10, self._animate_slide, target_relx, new_relx)
+
+    def _hide_voices(self):
+        if not self.animating:
+            self.animating = True
+            current_relx = float(self.voices_container.place_info()['relx'])
+            self._animate_slide(1.0, current_relx)
+
+    def _select_voice(self, voice_dict):
+        self.on_voice_selected(voice_dict)
+        self.destroy()
+
 class TTSWizardUI(ctk.CTk):
     def __init__(self):
         super().__init__()
 
         # --- 視窗基本設定 ---
         self.title("Discord TTS Wizard")
-        self.geometry("600x550")
+        self.geometry("700x580")
         self.minsize(500, 450)
         
         # 攔截視窗關閉事件，儲存設定
@@ -63,14 +252,40 @@ class TTSWizardUI(ctk.CTk):
         # 讓 text_input 的 row (也就是 row=2) 隨視窗放大而延展
         self.grid_rowconfigure(2, weight=1)
 
+        # 抓取所有 Edge-TTS 語音模型並依語系分群
+        self.voices_by_lang = {}
+        try:
+            voices_raw = asyncio.run(edge_tts.list_voices())
+            for voice in voices_raw:
+                short_name = voice['ShortName']
+                locale = voice['Locale']
+                gender = voice['Gender']
+                
+                # 清除重複前綴與 Neural 字尾
+                clean_name = short_name.replace(f"{locale}-", "").replace("Neural", "")
+                display_name = f"{locale} - {clean_name} ({gender})"
+                base_lang = get_language_name(locale)
+                
+                if base_lang not in self.voices_by_lang:
+                    self.voices_by_lang[base_lang] = []
+                    
+                self.voices_by_lang[base_lang].append({
+                    'display': display_name,
+                    'short_name': short_name,
+                    'locale': locale
+                })
+        except Exception as e:
+            logging.error(f"Failed to fetch voices: {e}")
+            self.voices_by_lang = {'Chinese': [{'display': 'zh-TW - zh-TW-HsiaoChenNeural (Female)', 'short_name': 'zh-TW-HsiaoChenNeural', 'locale': 'zh-TW'}]}
+            
+        # 讀取先前的設定檔
+        self._load_settings()
+        
         # 獲取音訊設備列表字典 {name: id}
         self.output_devices_map = get_audio_devices()
 
         # 用來儲存所有的 (combobox, row_frame) 參考，以便後續收集資料和刪除
         self.device_rows = []
-
-        # 讀取先前的設定檔
-        self._load_settings()
 
         # 建立所有 UI 元件
         self._create_widgets()
@@ -87,7 +302,7 @@ class TTSWizardUI(ctk.CTk):
     def _save_settings(self):
         try:
             settings = {
-                "voice": self.voice_combobox.get(),
+                "voice": getattr(self, 'current_voice_short_name', None),
                 "devices": [combo.get() for combo, _ in self.device_rows],
                 "auto_clear": self.auto_clear_var.get(),
                 "format": self.format_combobox.get() if hasattr(self, 'format_combobox') else "mp3",
@@ -120,20 +335,34 @@ class TTSWizardUI(ctk.CTk):
         self.settings_frame.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
         self.settings_frame.grid_columnconfigure(1, weight=1)  # 讓下拉式選單佔滿剩餘空間
         
-        # --- Voice Model ---
+        # --- Voice Selector Button ---
         self.voice_label = ctk.CTkLabel(self.settings_frame, text="Voice Model:", font=ctk.CTkFont(size=14))
-        self.voice_label.grid(row=0, column=0, padx=15, pady=(15, 10), sticky="nw")
+        self.voice_label.grid(row=0, column=0, padx=15, pady=(20, 10), sticky="nw")
         
-        self.voice_combobox = ctk.CTkComboBox(
-            self.settings_frame, 
-            values=['zh-TW-HsiaoChenNeural', 'zh-TW-YunJheNeural'],
-            font=ctk.CTkFont(size=14)
+        self.voice_selector_btn = ctk.CTkButton(
+            self.settings_frame,
+            text="Loading Voices...",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#2C3E50",
+            hover_color="#34495E",
+            height=40,
+            command=self._open_voice_selector
         )
-        self.voice_combobox.grid(row=0, column=1, padx=15, pady=(15, 10), sticky="ew")
+        self.voice_selector_btn.grid(row=0, column=1, padx=15, pady=(15, 10), sticky="ew")
         
-        # 載入儲存的語音模型設定
+        # 載入儲存的語音模型設定，或使用預設
         if self.saved_settings.get("voice"):
-            self.voice_combobox.set(self.saved_settings["voice"])
+            self.current_voice_short_name = self.saved_settings["voice"]
+            display_text = self.current_voice_short_name
+            for lang_list in self.voices_by_lang.values():
+                for v in lang_list:
+                    if v['short_name'] == self.current_voice_short_name:
+                        display_text = v['display']
+                        break
+            self._update_voice_button_text(display_text)
+        else:
+            self.current_voice_short_name = "zh-TW-HsiaoChenNeural"
+            self._update_voice_button_text("zh-TW - zh-TW-HsiaoChenNeural (Female)")
 
         # --- Modes Tabview (Live / Export) ---
         self.mode_tabview = ctk.CTkTabview(self.settings_frame, height=130)
@@ -282,6 +511,22 @@ class TTSWizardUI(ctk.CTk):
         self._on_tab_changed()
 
     # ==========================================
+    # Voice Selector 事件
+    # ==========================================
+    def _update_voice_button_text(self, display_text):
+        self.voice_selector_btn.configure(text=f"🎙 {display_text}")
+
+    def _open_voice_selector(self):
+        if hasattr(self, 'voice_popup') and self.voice_popup.winfo_exists():
+            return
+        self.voice_popup = VoiceSelectionPopup(self, self.voices_by_lang, getattr(self, 'current_voice_short_name', None), self._on_voice_selected)
+        
+    def _on_voice_selected(self, voice_dict):
+        self.current_voice_short_name = voice_dict['short_name']
+        self._update_voice_button_text(voice_dict['display'])
+        self._save_settings()
+
+    # ==========================================
     # Tab 切換事件
     # ==========================================
     def _on_tab_changed(self):
@@ -404,7 +649,7 @@ class TTSWizardUI(ctk.CTk):
         if not text_content:
             return
 
-        voice_model = self.voice_combobox.get()
+        voice_model = getattr(self, 'current_voice_short_name', "zh-TW-HsiaoChenNeural")
         current_tab = self.mode_tabview.get()
         
         # 根據不同的 Tab 執行不同邏輯
