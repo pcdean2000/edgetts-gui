@@ -1,6 +1,6 @@
 @echo off
 echo ===================================================
-echo   Discord TTS Wizard - PyInstaller Build Script
+echo   Edge TTS Wizard - PyInstaller Build Script
 echo ===================================================
 echo.
 
@@ -44,14 +44,14 @@ REM 3. Run PyInstaller
 echo [*] Running PyInstaller...
 REM Use --collect-all for customtkinter and other hidden dependencies
 REM Pack everything into a SINGLE executable (--onefile) and embed ffmpeg tools
-pyinstaller --noconfirm --onefile --windowed --name "Discord_TTS_Wizard" --add-data "%CTK_PATH%";customtkinter/ --add-data "ffmpeg.exe;." --add-data "ffprobe.exe;." --collect-all edge_tts --collect-all sounddevice --collect-all pydub gui.py
+pyinstaller --noconfirm --onefile --windowed --name "Edge_TTS_Wizard" --add-data "%CTK_PATH%";customtkinter/ --add-data "ffmpeg.exe;." --add-data "ffprobe.exe;." --collect-all edge_tts --collect-all sounddevice --collect-all pydub gui.py
 
 REM 4. Post-build instructions
 echo.
 echo ===================================================
 echo [*] Build Complete!
 echo.
-echo You can now share "dist\Discord_TTS_Wizard.exe" with anyone!
+echo You can now share "dist\Edge_TTS_Wizard.exe" with anyone!
 echo ffmpeg and dependencies are completely embedded inside the file.
 echo ===================================================
 echo.

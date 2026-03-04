@@ -236,7 +236,7 @@ class TTSWizardUI(ctk.CTk):
         super().__init__()
 
         # --- 視窗基本設定 ---
-        self.title("Discord TTS Wizard")
+        self.title("Edge TTS Wizard")
         self.geometry("700x580")
         self.minsize(500, 450)
         
@@ -323,7 +323,7 @@ class TTSWizardUI(ctk.CTk):
         # ==========================================
         self.title_label = ctk.CTkLabel(
             self, 
-            text="Discord TTS Wizard", 
+            text="Edge TTS Wizard", 
             font=ctk.CTkFont(size=26, weight="bold")
         )
         self.title_label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
