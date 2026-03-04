@@ -44,7 +44,7 @@ REM 3. Run PyInstaller
 echo [*] Running PyInstaller...
 REM Use --collect-all for customtkinter and other hidden dependencies
 REM Pack everything into a SINGLE executable (--onefile) and embed ffmpeg tools
-pyinstaller --noconfirm --onefile --windowed --name "Edge_TTS_Wizard" --add-data "%CTK_PATH%";customtkinter/ --add-data "ffmpeg.exe;." --add-data "ffprobe.exe;." --collect-all edge_tts --collect-all sounddevice --collect-all pydub gui.py
+pyinstaller --noconfirm --onefile --windowed --name "Edge_TTS_Wizard" --add-data "%CTK_PATH%";customtkinter/ --add-data "ffmpeg.exe;." --add-data "ffprobe.exe;." --collect-all edge_tts --collect-all sounddevice --collect-all pydub main.py
 
 REM 4. Post-build instructions
 echo.
